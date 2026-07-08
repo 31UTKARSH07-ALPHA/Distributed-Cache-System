@@ -31,7 +31,6 @@ public class Main {
         System.out.println("  get(a) = " + cache.get("a").orElse("MISS"));
         System.out.println("  get(b) = " + cache.get("b").orElse("MISS (evicted by LRU — expected)"));
         System.out.println("  get(d) = " + cache.get("d").orElse("MISS"));
-
         printMetrics(cache);
         System.out.println();
     }
