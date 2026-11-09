@@ -8,6 +8,7 @@ import storage.CacheEntry;
 import storage.IStorage;
 import ttl.TTLManager;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -130,6 +131,48 @@ public abstract class AbstractBaseCache<K, V>
                         storage.remove(key);
                         fireOnExpiry(key, entry.getValue());
                     });
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    // --- Rebalancing support (used by DistributedCache when nodes join or leave) ---
+
+    // Live (non-expired) entries at this moment.
+    List<CacheEntry<K, V>> liveEntries() {
+        lock.lock();
+        try {
+            List<CacheEntry<K, V>> live = new ArrayList<>();
+            for (CacheEntry<K, V> entry : storage.entries()) {
+                if (!entry.isExpired()) live.add(entry);
+            }
+            return live;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    // Accepts a migrated entry unless a newer write for the key already landed here. The entry object
+    // is stored as-is, so its original expiry time carries over. No put/eviction events: it's a move.
+    void acceptMigrated(CacheEntry<K, V> entry) {
+        lock.lock();
+        try {
+            K key = entry.getKey();
+            boolean hasNewerValue = storage.get(key).filter(existing -> !existing.isExpired()).isPresent();
+            if (hasNewerValue || entry.isExpired()) return;
+            storage.put(key, entry);
+            onInsertHook(key, entry);
+            evictIfNeeded();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    // Drops a key that has moved to another node, without firing eviction events.
+    void releaseMigrated(K key) {
+        lock.lock();
+        try {
+            storage.remove(key).ifPresent(entry -> onRemoveHook(key));
         } finally {
             lock.unlock();
         }

@@ -1,6 +1,8 @@
 import api.ICache;
 import api.ICacheMetrics;
+import distribution.ConsistentHashMapper;
 import factory.CacheBuilder;
+import service.DistributedCache;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -23,6 +25,9 @@ public class CacheTests {
         test("Concurrent get/put never exceeds capacity or throws", CacheTests::concurrentAccessRespectsCapacity);
         test("Metrics count capacity evictions and expiries", CacheTests::metricsCountEvictionsAndExpiries);
         test("Distributed metrics count evictions across nodes", CacheTests::distributedMetricsCountEvictions);
+        test("Adding a node loses no keys", CacheTests::addNodeMigratesKeys);
+        test("Add then remove a node never returns stale values", CacheTests::addThenRemoveNodeHasNoStaleReads);
+        test("Migrated entries keep their original TTL", CacheTests::migrationPreservesTtl);
 
         System.out.printf("%n%d passed, %d failed%n", passed, failures.size());
         failures.forEach(f -> System.out.println("  FAILED: " + f));
@@ -97,6 +102,54 @@ public class CacheTests {
         // 3 nodes x 10 capacity = 30 kept, so 270 must have been evicted
         check(cache.size() == 30, "expected 30 entries across 3 nodes, got " + cache.size());
         check(metrics.totalEvictions() == 270, "expected 270 evictions, got " + metrics.totalEvictions());
+    }
+
+    private static DistributedCache<String, String> distributedWith(String... nodes) {
+        ConsistentHashMapper<String> mapper = new ConsistentHashMapper<>();
+        for (String node : nodes) mapper.addNode(node);
+        return new DistributedCache<>(mapper, addr -> nodeFactory().create(addr));
+    }
+
+    private static DistributedCache.NodeCacheFactory<String, String> nodeFactory() {
+        return addr -> new service.LocalCache<>(new storage.ConcurrentStorage<>(),
+                new eviction.LRUEvictionPolicy<>(100_000), 0);
+    }
+
+    static void addNodeMigratesKeys() {
+        DistributedCache<String, String> cache = distributedWith("A", "B", "C");
+        for (int i = 0; i < 3_000; i++) cache.put("k" + i, "v" + i);
+
+        cache.addNode("D", nodeFactory());
+
+        int missing = 0;
+        for (int i = 0; i < 3_000; i++) if (!cache.get("k" + i).equals(java.util.Optional.of("v" + i))) missing++;
+        check(missing == 0, missing + " keys were lost or wrong after adding a node");
+        check(cache.size() == 3_000, "expected 3000 entries after rebalance, got " + cache.size());
+    }
+
+    static void addThenRemoveNodeHasNoStaleReads() {
+        DistributedCache<String, String> cache = distributedWith("A");
+        for (int i = 0; i < 1_000; i++) cache.put("k" + i, "old");
+
+        cache.addNode("B", nodeFactory());
+        for (int i = 0; i < 1_000; i++) cache.put("k" + i, "new");   // every key updated
+        cache.removeNode("B");
+
+        int stale = 0;
+        for (int i = 0; i < 1_000; i++) if (!cache.get("k" + i).equals(java.util.Optional.of("new"))) stale++;
+        check(stale == 0, stale + " keys returned a stale or missing value");
+    }
+
+    static void migrationPreservesTtl() throws Exception {
+        DistributedCache<String, String> cache = distributedWith("A");
+        for (int i = 0; i < 200; i++) cache.put("k" + i, "v", 150);
+
+        cache.addNode("B", nodeFactory());   // ~half the keys move to B
+        Thread.sleep(250);
+
+        int alive = 0;
+        for (int i = 0; i < 200; i++) if (cache.get("k" + i).isPresent()) alive++;
+        check(alive == 0, alive + " keys outlived their TTL after migration");
     }
 
     // --- tiny test harness ---
