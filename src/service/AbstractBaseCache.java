@@ -129,6 +129,7 @@ public abstract class AbstractBaseCache<K, V>
                     .filter(CacheEntry::isExpired)
                     .ifPresent(entry -> {
                         storage.remove(key);
+                        onRemoveHook(key);   // drop it from the eviction policy too, or it lingers as a ghost
                         fireOnExpiry(key, entry.getValue());
                     });
         } finally {

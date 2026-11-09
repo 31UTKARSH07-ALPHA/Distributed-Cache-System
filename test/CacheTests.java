@@ -30,6 +30,7 @@ public class CacheTests {
         test("Migrated entries keep their original TTL", CacheTests::migrationPreservesTtl);
         test("Background sweep removes expired keys nobody reads", CacheTests::sweepRemovesUnreadExpiredKeys);
         test("Distributed build rejects a shared eviction policy", CacheTests::distributedRejectsSharedPolicy);
+        test("Expired keys are removed from the eviction policy", CacheTests::expiryLeavesNoGhostKeysInPolicy);
 
         System.out.printf("%n%d passed, %d failed%n", passed, failures.size());
         failures.forEach(f -> System.out.println("  FAILED: " + f));
@@ -170,6 +171,36 @@ public class CacheTests {
             return;
         }
         throw new AssertionError("expected IllegalStateException for a shared eviction policy");
+    }
+
+    // Wraps the real LRU policy and records which keys it is currently tracking.
+    static final class TrackingPolicy<K, V> implements eviction.IEvictionPolicy<K, V> {
+        final eviction.LRUEvictionPolicy<K, V> lru;
+        final java.util.Set<K> tracked = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        TrackingPolicy(int capacity) { this.lru = new eviction.LRUEvictionPolicy<>(capacity); }
+        public void onAccess(K key) { lru.onAccess(key); }
+        public void onInsert(K key) { tracked.add(key); lru.onInsert(key); }
+        public void onRemove(K key) { tracked.remove(key); lru.onRemove(key); }
+        public java.util.Optional<K> evict() { java.util.Optional<K> k = lru.evict(); k.ifPresent(tracked::remove); return k; }
+        public int getCapacity() { return lru.getCapacity(); }
+    }
+
+    static void expiryLeavesNoGhostKeysInPolicy() throws Exception {
+        TrackingPolicy<Integer, Integer> lazyPolicy = new TrackingPolicy<>(1_000);
+        ICache<Integer, Integer> lazy = CacheBuilder.<Integer, Integer>newBuilder()
+                .capacity(1_000).ttl(30).evictionPolicy(lazyPolicy).buildLocal();
+        for (int i = 0; i < 100; i++) lazy.put(i, i);
+        Thread.sleep(80);
+        for (int i = 0; i < 100; i++) lazy.get(i);          // lazy expiry path
+        check(lazyPolicy.tracked.isEmpty(), "lazy expiry left " + lazyPolicy.tracked.size() + " ghost keys in the policy");
+
+        TrackingPolicy<Integer, Integer> sweepPolicy = new TrackingPolicy<>(1_000);
+        ICache<Integer, Integer> swept = CacheBuilder.<Integer, Integer>newBuilder()
+                .capacity(1_000).ttl(30).ttlSweepInterval(20).evictionPolicy(sweepPolicy).buildLocal();
+        for (int i = 0; i < 100; i++) swept.put(i, i);
+        Thread.sleep(150);                                    // background sweep path
+        check(swept.size() == 0, "sweep should have emptied storage, size=" + swept.size());
+        check(sweepPolicy.tracked.isEmpty(), "sweep left " + sweepPolicy.tracked.size() + " ghost keys in the policy");
     }
 
     // --- tiny test harness ---
