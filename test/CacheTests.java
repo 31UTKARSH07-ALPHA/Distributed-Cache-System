@@ -28,6 +28,8 @@ public class CacheTests {
         test("Adding a node loses no keys", CacheTests::addNodeMigratesKeys);
         test("Add then remove a node never returns stale values", CacheTests::addThenRemoveNodeHasNoStaleReads);
         test("Migrated entries keep their original TTL", CacheTests::migrationPreservesTtl);
+        test("Background sweep removes expired keys nobody reads", CacheTests::sweepRemovesUnreadExpiredKeys);
+        test("Distributed build rejects a shared eviction policy", CacheTests::distributedRejectsSharedPolicy);
 
         System.out.printf("%n%d passed, %d failed%n", passed, failures.size());
         failures.forEach(f -> System.out.println("  FAILED: " + f));
@@ -150,6 +152,24 @@ public class CacheTests {
         int alive = 0;
         for (int i = 0; i < 200; i++) if (cache.get("k" + i).isPresent()) alive++;
         check(alive == 0, alive + " keys outlived their TTL after migration");
+    }
+
+    static void sweepRemovesUnreadExpiredKeys() throws Exception {
+        ICache<Integer, Integer> cache = CacheBuilder.<Integer, Integer>newBuilder()
+                .capacity(1_000).ttl(50).ttlSweepInterval(25).buildLocal();
+        for (int i = 0; i < 500; i++) cache.put(i, i);
+        Thread.sleep(200);       // never read; only the sweep can remove them
+        check(cache.size() == 0, "sweep should have removed all 500 expired keys, size=" + cache.size());
+    }
+
+    static void distributedRejectsSharedPolicy() {
+        try {
+            CacheBuilder.<String, String>newBuilder()
+                    .evictionPolicy(new eviction.LRUEvictionPolicy<>(10)).addNode("A").addNode("B").buildDistributed();
+        } catch (IllegalStateException expected) {
+            return;
+        }
+        throw new AssertionError("expected IllegalStateException for a shared eviction policy");
     }
 
     // --- tiny test harness ---
