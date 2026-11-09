@@ -58,11 +58,17 @@ public final class CacheBuilder<K, V> {
         ICache<K, V> cache = new LocalCache<>(stor, policy, defaultTTLMillis);
         return wrap(cache);
     }
+
+    // Node caches are left unwrapped: metrics are collected once, on the outer distributed cache,
+    // which forwards its listeners to every node.
+    private LocalCache<K, V> buildNode() {
+        return new LocalCache<>(new ConcurrentStorage<>(capacity), new LRUEvictionPolicy<>(capacity), defaultTTLMillis);
+    }
     public ICache<K, V> buildDistributed() {
         if (nodes.isEmpty()) throw new IllegalStateException("Nodes required for distributed mode.");
         INodeMapper<K> mapper = (nodeMapper != null) ? nodeMapper : new ConsistentHashMapper<>();
         nodes.forEach(mapper::addNode);
-        ICache<K, V> distributed = new DistributedCache<>(mapper, addr -> buildLocal());
+        ICache<K, V> distributed = new DistributedCache<>(mapper, addr -> buildNode());
         return wrap(distributed);
     }
 

@@ -1,16 +1,22 @@
 package service;
 
 import api.ICache;
+import api.ICacheEvents;
 import distribution.INodeMapper;
+import events.ICacheListener;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
-public class DistributedCache <K,V> implements ICache<K,V> {
+public class DistributedCache <K,V> implements ICache<K,V>, ICacheEvents<K,V> {
     private final INodeMapper<K> nodeMapper;
 
     private final Map<String, ICache<K, V>> nodeCaches;
+    // Kept so nodes added later get the same listeners as existing ones.
+    private final List<ICacheListener<K, V>> listeners = new CopyOnWriteArrayList<>();
     public interface NodeCacheFactory<K, V> {
         ICache<K, V> create(String nodeAddress);
     }
@@ -56,8 +62,33 @@ public class DistributedCache <K,V> implements ICache<K,V> {
     }
 
     public void addNode(String nodeAddress, NodeCacheFactory<K, V> factory) {
+        ICache<K, V> cache = factory.create(nodeAddress);
+        listeners.forEach(l -> subscribe(cache, l));
         nodeMapper.addNode(nodeAddress);
-        nodeCaches.put(nodeAddress, factory.create(nodeAddress));
+        nodeCaches.put(nodeAddress, cache);
+    }
+
+    @Override
+    public void addListener(ICacheListener<K, V> listener) {
+        if (!((CopyOnWriteArrayList<ICacheListener<K, V>>) listeners).addIfAbsent(listener)) return;
+        nodeCaches.values().forEach(cache -> subscribe(cache, listener));
+    }
+
+    @Override
+    public void removeListener(ICacheListener<K, V> listener) {
+        listeners.remove(listener);
+        nodeCaches.values().forEach(cache -> {
+            if (cache instanceof ICacheEvents<?, ?>) eventsOf(cache).removeListener(listener);
+        });
+    }
+
+    private void subscribe(ICache<K, V> cache, ICacheListener<K, V> listener) {
+        if (cache instanceof ICacheEvents<?, ?>) eventsOf(cache).addListener(listener);
+    }
+
+    @SuppressWarnings("unchecked")
+    private ICacheEvents<K, V> eventsOf(ICache<K, V> cache) {
+        return (ICacheEvents<K, V>) cache;
     }
 
     public void removeNode(String nodeAddress) {
