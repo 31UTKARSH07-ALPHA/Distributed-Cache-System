@@ -1,5 +1,4 @@
 package ttl;
-import events.ICacheListener;
 import storage.CacheEntry;
 import storage.IStorage;
 
@@ -12,17 +11,23 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+// Finds expired entries; the owning cache removes them (under its lock) via the ExpiryHandler,
+// so the sweep thread never touches the cache's eviction state directly.
 public class TTLManager<K, V> implements AutoCloseable {
     private static final Logger log = Logger.getLogger(TTLManager.class.getName());
 
+    public interface ExpiryHandler<K> {
+        void expireIfStale(K key);
+    }
+
     private final IStorage<K, V> storage;
-    private final List<ICacheListener<K, V>> listeners;
+    private final ExpiryHandler<K> expiryHandler;
     private final ScheduledExecutorService scheduler;
     private ScheduledFuture<?> sweepTask;
 
-    public TTLManager(IStorage<K, V> storage, List<ICacheListener<K, V>> listeners) {
-        this.storage   = storage;
-        this.listeners = listeners;
+    public TTLManager(IStorage<K, V> storage, ExpiryHandler<K> expiryHandler) {
+        this.storage       = storage;
+        this.expiryHandler = expiryHandler;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "cache-ttl-sweep");
             t.setDaemon(true);
@@ -37,35 +42,21 @@ public class TTLManager<K, V> implements AutoCloseable {
         );
         log.fine("TTL sweep scheduled every " + intervalMillis + "ms");
     }
-    public boolean checkAndExpire(K key) {
-        return storage.get(key)
-                .filter(CacheEntry::isExpired)
-                .map(entry -> {
-                    storage.remove(key);
-                    notifyExpiry(entry);
-                    return true;
-                })
-                .orElse(false);
-    }
     public void sweep() {
-        List<K> expired = new ArrayList<>();
-        for (CacheEntry<K, V> entry : storage.entries()) {
-            if (entry.isExpired()) expired.add(entry.getKey());
-        }
-        for (K key : expired) {
-            storage.remove(key).ifPresent(this::notifyExpiry);
-        }
-        if (!expired.isEmpty()) {
-            log.fine(() -> "TTL sweep removed " + expired.size() + " expired entries");
-        }
-    }
-    private void notifyExpiry(CacheEntry<K, V> entry) {
-        for (ICacheListener<K, V> listener : listeners) {
-            try {
-                listener.onExpiry(entry.getKey(), entry.getValue());
-            } catch (Exception e) {
-                log.log(Level.WARNING, "Listener threw on onExpiry", e);
+        try {
+            List<K> expired = new ArrayList<>();
+            for (CacheEntry<K, V> entry : storage.entries()) {
+                if (entry.isExpired()) expired.add(entry.getKey());
             }
+            for (K key : expired) {
+                expiryHandler.expireIfStale(key);
+            }
+            if (!expired.isEmpty()) {
+                log.fine(() -> "TTL sweep removed " + expired.size() + " expired entries");
+            }
+        } catch (Exception e) {
+            // An exception would silently cancel scheduleAtFixedRate, so log and keep sweeping.
+            log.log(Level.WARNING, "TTL sweep failed", e);
         }
     }
 
