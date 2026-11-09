@@ -35,17 +35,13 @@ public class LocalCache<K, V> extends AbstractBaseCache<K, V> {
         evictionPolicy.onRemove(key);
     }
 
+    // Called from put() while holding the cache lock. evict() already drops the key from the policy.
     @Override
     protected void evictIfNeeded() {
         Optional<K> victim = evictionPolicy.evict();
         victim.ifPresent(key ->
-                storage.remove(key).ifPresent(entry -> {
-                    evictionPolicy.onRemove(key);
-                    listeners.forEach(l -> {
-                        try { l.onEviction(key, entry.getValue(), EvictionCause.CAPACITY); }
-                        catch (Exception ignored) {}
-                    });
-                })
+                storage.remove(key).ifPresent(entry ->
+                        fireOnEviction(key, entry.getValue(), EvictionCause.CAPACITY))
         );
     }
 

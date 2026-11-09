@@ -1,7 +1,10 @@
 package service;
 
 import api.ICache;
+import api.ICacheEvents;
 import api.ICacheMetrics;
+import events.EvictionCause;
+import events.NoOpCacheListener;
 
 import java.util.Optional;
 import java.util.concurrent.atomic.LongAdder;
@@ -17,6 +20,23 @@ public class MetricsCache<K, V> implements ICache<K, V>, ICacheMetrics {
 
     public MetricsCache(ICache<K, V> delegate) {
         this.delegate = delegate;
+        // Evictions and expiries happen inside the delegate, not in a call that passes through here,
+        // so subscribe to its events (Observer) to count them.
+        if (delegate instanceof ICacheEvents<?, ?>) {
+            @SuppressWarnings("unchecked")
+            ICacheEvents<K, V> events = (ICacheEvents<K, V>) delegate;
+            events.addListener(new NoOpCacheListener<>() {
+                @Override
+                public void onEviction(K key, V value, EvictionCause cause) {
+                    // Only capacity pressure counts; explicit invalidate() is not an eviction.
+                    if (cause == EvictionCause.CAPACITY) evictions.increment();
+                }
+                @Override
+                public void onExpiry(K key, V value) {
+                    expiries.increment();
+                }
+            });
+        }
     }
     @Override
     public Optional<V> get(K key) {

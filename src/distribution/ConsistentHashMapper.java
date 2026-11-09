@@ -60,7 +60,7 @@ public class ConsistentHashMapper<K> implements INodeMapper<K> {
         if (positions != null) positions.forEach(ring::remove);
     }
     @Override
-    public List<String> allNodes() {
+    public synchronized List<String> allNodes() {
         return List.copyOf(nodePositions.keySet());
     }
     private long hash(String key) {
